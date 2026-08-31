@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>anybridge demo — WebMCP task list</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+    li.done { text-decoration: line-through; color: #888; }
+  </style>
+</head>
+<body>
+  <h1>Task list</h1>
+  <p>This page registers three WebMCP tools. Point anybridge at it:</p>
+  <pre>anybridge list file://.../examples/demo-site/index.html</pre>
+  <ul id="tasks"></ul>
+
+  <script>
+    const tasks = [];
+
+    function render() {
+      const ul = document.getElementById("tasks");
+      ul.innerHTML = "";
+      tasks.forEach((t) => {
+        const li = document.createElement("li");
+        li.textContent = t.title;
+        if (t.done) li.className = "done";
+        ul.appendChild(li);
+      });
+    }
+
+    const ctx = navigator.modelContext || document.modelContext;
+
+    ctx.registerTool({
+      name: "add_task",
+      description: "Add a task to the list",
+      inputSchema: {
+        type: "object",
+        properties: { title: { type: "string", description: "Task title" } },
+        required: ["title"],
+      },
+      async execute({ title }) {
+        tasks.push({ title, done: false });
+        render();
+        return { content: [{ type: "text", text: `Added task: ${title}` }] };
+      },
+    });
+
+    ctx.registerTool({
+      name: "list_tasks",
+      description: "List all tasks with their status",
+      inputSchema: { type: "object", properties: {} },
+      async execute() {
+        const text = tasks.length
+          ? tasks.map((t, i) => `${i}. [${t.done ? "x" : " "}] ${t.title}`).join("\n")
+          : "No tasks yet.";
+        return { content: [{ type: "text", text }] };
+      },
+    });
+
+    ctx.registerTool({
+      name: "complete_task",
+      description: "Mark a task as done by its index",
+      inputSchema: {
+        type: "object",
+        properties: { index: { type: "integer", description: "Task index from list_tasks" } },
+        required: ["index"],
+      },
+      async execute({ index }) {
+        if (!tasks[index]) {
+          return { content: [{ type: "text", text: `No task at index ${index}` }] };
+        }
+        tasks[index].done = true;
+        render();
+        return { content: [{ type: "text", text: `Completed: ${tasks[index].title}` }] };
+      },
+    });
+  </script>
+</body>
+</html>

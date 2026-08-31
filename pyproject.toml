@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anybridge"
+version = "0.1.0"
+description = "Expose any web page's WebMCP tools to any agent, as a standard MCP server"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Vincenzo" }]
+keywords = ["webmcp", "mcp", "agents", "browser", "model-context-protocol"]
+dependencies = [
+    "mcp>=1.0",
+    "playwright>=1.45",
+]
+
+[project.scripts]
+anybridge = "anybridge.cli:main"
+
+[tool.setuptools]
+packages = ["anybridge"]
+
+[tool.setuptools.package-data]
+anybridge = ["shim.js"]
