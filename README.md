@@ -1,15 +1,19 @@
 # anybridge
 
-**Expose any web page's WebMCP tools to any agent.**
+**Expose any web page to any agent.**
 
-[WebMCP](https://github.com/webmachinelearning/webmcp) lets a website register typed, callable tools for AI agents (`navigator.modelContext.registerTool` / `document.modelContext`). It is in origin trial in Chrome — but today only Gemini in Chrome can consume those tools.
+anybridge opens a page in a real browser and re-exposes it as a **standard MCP server**, so anything that speaks MCP — Claude, GPT via the OpenAI Agents SDK, any MCP client — can drive the site. Tools come from two sources, merged:
 
-anybridge closes that gap: it opens the page, captures every WebMCP tool the site registers, and re-exposes them as a **standard MCP server**. Anything that speaks MCP — Claude, the OpenAI Agents SDK, any MCP client — can now drive the site through the tools the site itself declared. Tool calls run inside the real page, so the site's own JavaScript does the work.
+1. **WebMCP tools the site registers.** [WebMCP](https://github.com/webmachinelearning/webmcp) lets a website declare typed, callable tools for AI agents (`navigator.modelContext.registerTool` / `document.modelContext`). It is in origin trial in Chrome — but today only Gemini in Chrome can consume those tools. anybridge captures them and hands them to every other agent.
+2. **Built-in universal tools** that work on *any* site, WebMCP or not: `read_page`, `navigate`, `list_links`, `list_forms`, `submit_form`, `type_text`, `click`.
+
+Every call runs inside the real page — the site's own JavaScript does the work.
 
 ```
-              site JS registers tools
-  web page ──────────────────────────► anybridge shim ──► MCP server ──► any agent
-           ◄────────────────────────── tool calls proxied back into the page
+              site JS registers WebMCP tools
+  web page ─────────────────────────────────► anybridge ──► MCP server ──► any agent
+           ◄───────────────────────────────── tool calls executed in the live page
+              + universal read/navigate/forms/click on any site
 ```
 
 ## Install
@@ -21,22 +25,35 @@ playwright install chromium
 
 ## Usage
 
-List the tools a page registers:
+List the tools available on a page (the site's WebMCP tools plus the built-ins):
 
 ```bash
 anybridge list https://example.com
 ```
 
-Call one directly:
+Call tools directly from the shell — works on real sites today:
 
 ```bash
+# read any page as markdown
+anybridge call https://en.wikipedia.org/wiki/Rome read_page
+
+# search Wikipedia by filling its real search form
+anybridge call https://en.wikipedia.org/wiki/Main_Page submit_form \
+  --args '{"form": 0, "fields": {"search": "Model Context Protocol"}}'
+
+# type into a React SPA input (no <form> needed) and press Enter
+anybridge call https://demo.playwright.dev/todomvc/ type_text \
+  --args '{"target": "What needs to be done?", "text": "hello", "press_enter": true}'
+
+# call a WebMCP tool the site registered
 anybridge call https://example.com add_task --args '{"title": "ship v1"}'
 ```
 
 Serve the page as an MCP server (stdio):
 
 ```bash
-anybridge serve https://example.com
+anybridge serve https://example.com          # WebMCP tools + built-ins
+anybridge serve https://example.com --no-builtins   # only the site's own tools
 ```
 
 ### Works with any agent
@@ -96,16 +113,21 @@ anybridge call "file://$PWD/examples/demo-site/index.html" add_task --args '{"ti
 
 ## How it works
 
-1. A shim is injected before any page script runs, defining `navigator.modelContext` and `document.modelContext` (and wrapping the native ones where they exist).
-2. Every `registerTool` / `provideContext` call lands in a registry inside the page.
-3. The MCP server mirrors that registry as MCP tools; each `call_tool` is evaluated inside the page, invoking the site's own `execute` function.
+1. Playwright launches full Chromium in new-headless mode (less likely to be blocked as a bot), with automatic retries on transient network errors.
+2. Two scripts are injected before any page script runs: a shim defining `navigator.modelContext` / `document.modelContext` (wrapping the native ones where they exist), and the page-tools helpers for DOM extraction and form handling.
+3. Every `registerTool` / `provideContext` call lands in a registry inside the page. The MCP server mirrors that registry, merged with the built-in tools (site names win collisions).
+4. Each tool call is evaluated inside the live page: WebMCP calls invoke the site's own `execute` function; built-ins read the DOM, fill real form fields (with native setters, so React apps see the input), click real elements, and follow navigations and new tabs.
+
+## Limits
+
+Sites behind aggressive anti-bot walls (CAPTCHA, some search engines' bot checks) may still refuse a headless browser — anybridge reports what the page actually served, so the agent sees the refusal instead of a hallucination. Cookie banners are handled by the agent itself with `click("Accept all")`.
 
 ## Roadmap
 
 - Streamable HTTP transport (one bridge, many agents)
 - Sessions with login state (persistent browser profiles)
-- Fallback for sites **without** WebMCP: derive tools from forms and page actions
 - Tool change notifications (pages that register tools dynamically per view)
+- Browserless fast path for static pages
 
 ## License
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anybridge"
-version = "0.1.0"
-description = "Expose any web page's WebMCP tools to any agent, as a standard MCP server"
+version = "0.2.0"
+description = "Expose any web page to any agent, as a standard MCP server"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
