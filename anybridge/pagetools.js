@@ -110,7 +110,8 @@
     extract(selector, maxChars) {
       maxChars = maxChars || 20000;
       const root = selector ? document.querySelector(selector) : document.body;
-      if (!root) return `No element matches selector: ${selector}`;
+      if (!root)
+        return selector ? `No element matches selector: ${selector}` : "__anybridge_no_body__";
       let md = clean(toMd(root));
       const head = `# ${document.title || "(no title)"}\nURL: ${location.href}\n\n`;
       if (md.length > maxChars) {

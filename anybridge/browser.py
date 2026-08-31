@@ -88,6 +88,22 @@ class PageBridge:
             await self._page.wait_for_load_state("load", timeout=8000)
         except PWTimeoutError:
             pass
+        # Bot challenges sometimes resolve into a transient error page: reload once or twice.
+        for _ in range(2):
+            try:
+                title = await self._page.title() or ""
+            except Error:
+                break
+            if not any(
+                marker in title
+                for marker in ("502 Bad Gateway", "503 Service", "504 Gateway", "Just a moment")
+            ):
+                break
+            await asyncio.sleep(3.0)
+            try:
+                await self._page.reload(wait_until="domcontentloaded", timeout=30000)
+            except (PWTimeoutError, Error):
+                break
 
     async def _settle(self, seconds: float = 1.0):
         try:
@@ -95,6 +111,21 @@ class PageBridge:
         except PWTimeoutError:
             pass
         await asyncio.sleep(seconds)
+
+    async def _eval_read(self, expression: str, arg=None):
+        """Evaluate a read-only expression, retrying when a navigation races us.
+
+        Only for side-effect-free reads: an action (tool call, form submit)
+        must never be silently re-executed.
+        """
+        for _ in range(4):
+            try:
+                return await self._page.evaluate(expression, arg)
+            except Error as exc:
+                if "Execution context was destroyed" not in str(exc) and "Cannot find context" not in str(exc):
+                    raise
+                await self._settle(1.0)
+        return await self._page.evaluate(expression, arg)
 
     # ---- WebMCP tools registered by the page ----
 
@@ -110,7 +141,7 @@ class PageBridge:
         return await self.list_tools()
 
     async def list_tools(self) -> list[dict]:
-        return await self._page.evaluate("() => window.__anybridge__.listTools()")
+        return await self._eval_read("() => window.__anybridge__.listTools()")
 
     async def call_tool(self, name: str, args: dict | None = None):
         return await self._page.evaluate(_CALL_JS, {"name": name, "args": args or {}})
@@ -118,10 +149,17 @@ class PageBridge:
     # ---- Universal operations, work on any page ----
 
     async def read_page(self, selector: str | None = None, max_chars: int = 20000) -> str:
-        return await self._page.evaluate(
-            "({selector, maxChars}) => window.__anybridge_pt__.extract(selector, maxChars)",
-            {"selector": selector, "maxChars": max_chars},
-        )
+        # Pages mid-redirect (bot challenges, meta refreshes) briefly have no body:
+        # retry instead of reporting an empty page.
+        for _ in range(4):
+            md = await self._eval_read(
+                "({selector, maxChars}) => window.__anybridge_pt__.extract(selector, maxChars)",
+                {"selector": selector, "maxChars": max_chars},
+            )
+            if md != "__anybridge_no_body__":
+                return md
+            await asyncio.sleep(1.5)
+        return "The page has no readable content (empty document)."
 
     async def navigate(self, url: str) -> str:
         await self._goto(url)
@@ -129,13 +167,13 @@ class PageBridge:
         return await self.read_page()
 
     async def list_links(self, filter: str | None = None, limit: int = 100) -> list[dict]:
-        return await self._page.evaluate(
+        return await self._eval_read(
             "({filter, limit}) => window.__anybridge_pt__.links(filter, limit)",
             {"filter": filter, "limit": limit},
         )
 
     async def list_forms(self) -> list[dict]:
-        return await self._page.evaluate("() => window.__anybridge_pt__.forms()")
+        return await self._eval_read("() => window.__anybridge_pt__.forms()")
 
     async def submit_form(self, form: int, fields: dict) -> str:
         await self._page.evaluate(
