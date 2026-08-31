@@ -52,7 +52,7 @@
       case "P": return `\n\n${t()}\n\n`;
       case "BR": return "\n";
       case "HR": return "\n\n---\n\n";
-      case "LI": return `\n- ${t()}`;
+      case "LI": return t() ? `\n- ${t()}` : "";
       case "UL":
       case "OL": return `\n${kids}\n`;
       case "BLOCKQUOTE": return `\n\n> ${t()}\n\n`;
