@@ -114,6 +114,12 @@
         return selector ? `No element matches selector: ${selector}` : "__anybridge_no_body__";
       let md = clean(toMd(root));
       const head = `# ${document.title || "(no title)"}\nURL: ${location.href}\n\n`;
+      if (!md && selector)
+        return (
+          head +
+          `(The element matching "${selector}" has no readable content — it may be an empty ` +
+          "scroll anchor. Try read_page without a selector, or a broader one.)"
+        );
       if (md.length > maxChars) {
         md = md.slice(0, maxChars) + `\n\n[... truncated, ${md.length} chars total — call read_page with a selector or higher max_chars]`;
       }
