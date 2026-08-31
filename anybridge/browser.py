@@ -188,8 +188,20 @@ class PageBridge:
                 )
         except PWTimeoutError:
             pass  # no full navigation: SPA updated in place
+        except Error as exc:
+            if "net::" not in str(exc):
+                raise
+            await self._recover_navigation()
         await self._settle()
         return await self.read_page()
+
+    async def _recover_navigation(self):
+        """Retry a navigation that died on a transient network error."""
+        await asyncio.sleep(2.0)
+        try:
+            await self._page.reload(wait_until="domcontentloaded", timeout=30000)
+        except (PWTimeoutError, Error):
+            pass
 
     async def click(self, target: str) -> str:
         page = self._page
@@ -219,40 +231,64 @@ class PageBridge:
                 await locator.click(timeout=8000)
         except PWTimeoutError:
             pass  # in-page update or new tab (handled by _on_new_page)
+        except Error as exc:
+            if "net::" not in str(exc):
+                raise
+            await self._recover_navigation()
         await self._settle()
         return await self.read_page()
 
+    @staticmethod
+    async def _editable(locator) -> bool:
+        try:
+            return await locator.evaluate(
+                "el => ['INPUT','TEXTAREA'].includes(el.tagName) || el.isContentEditable"
+            )
+        except Exception:
+            return False
+
     async def type_text(self, target: str, text: str, press_enter: bool = False) -> str:
         page = self._page
-        locator = None
-        for candidate in (
+        attr = target.replace('"', '\\"')
+        candidates = [
             page.get_by_placeholder(target),
+            page.locator(f'input[name="{attr}"], textarea[name="{attr}"]'),
+            page.locator(f'input[id="{attr}"], textarea[id="{attr}"]'),
             page.get_by_label(target),
             page.get_by_role("textbox", name=target),
             page.get_by_role("searchbox", name=target),
-        ):
+        ]
+        try:
+            candidates.append(page.locator(target))
+        except Exception:
+            pass
+        locator = None
+        for candidate in candidates:
             try:
-                if await candidate.count() > 0:
-                    locator = candidate.first
+                if await candidate.count() == 0:
+                    continue
+                first = candidate.first
+                if await self._editable(first):
+                    locator = first
                     break
             except Exception:
                 continue
         if locator is None:
-            try:
-                css = page.locator(target)
-                if await css.count() > 0:
-                    locator = css.first
-            except Exception:
-                pass
-        if locator is None:
-            return f'No input matching "{target}" (tried placeholder, label, textbox name, CSS selector).'
-        await locator.fill(text)
+            return (
+                f'No editable input matching "{target}" '
+                "(tried placeholder, name/id attribute, label, textbox role, CSS selector)."
+            )
+        await locator.fill(text, timeout=8000)
         if press_enter:
             try:
                 async with page.expect_navigation(wait_until="domcontentloaded", timeout=6000):
                     await locator.press("Enter")
             except PWTimeoutError:
                 pass
+            except Error as exc:
+                if "net::" not in str(exc):
+                    raise
+                await self._recover_navigation()
         await self._settle()
         return await self.read_page()
 
