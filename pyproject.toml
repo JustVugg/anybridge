@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anybridge"
-version = "0.2.2"
+version = "0.2.3"
 description = "Expose any web page to any agent, as a standard MCP server"
 readme = "README.md"
 license = { text = "MIT" }

@@ -8,20 +8,38 @@
     "FORM", "FIELDSET", "FIGURE", "FIGCAPTION", "DL", "DT", "DD",
   ]);
 
-  const hidden = (el) => {
+  const style = (el) => {
     try {
-      const s = getComputedStyle(el);
-      return s.display === "none" || s.visibility === "hidden";
+      return getComputedStyle(el);
     } catch {
-      return false;
+      return null;
     }
   };
 
+  const hidden = (el) => {
+    const s = style(el);
+    return !!s && (s.display === "none" || s.visibility === "hidden");
+  };
+
   const toMd = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent.replace(/\s+/g, " ");
+    if (node.nodeType === Node.TEXT_NODE) {
+      // Text inherits visibility from its parent (which children can override,
+      // so a hidden ancestor must not prune the walk — see below).
+      const p = node.parentElement;
+      if (p) {
+        const s = style(p);
+        if (s && s.visibility === "hidden") return "";
+      }
+      return node.textContent.replace(/\s+/g, " ");
+    }
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     const tag = node.tagName;
-    if (SKIP.has(tag) || hidden(node)) return "";
+    if (SKIP.has(tag)) return "";
+    const s = style(node);
+    // display:none hides the whole subtree — safe to prune.
+    // visibility:hidden is NOT: descendants can set visibility:visible (Wix does).
+    if (s && s.display === "none") return "";
+    if (s && s.visibility === "hidden" && tag === "IMG") return "";
     const kids = [...node.childNodes].map(toMd).join("");
     const t = () => kids.trim();
     switch (tag) {
@@ -132,8 +150,12 @@
       const seen = new Set();
       const out = [];
       for (const a of document.querySelectorAll("a[href]")) {
-        if (hidden(a)) continue;
-        const text = a.textContent.replace(/\s+/g, " ").trim().slice(0, 150);
+        const s = style(a);
+        if (s && s.display === "none") continue;
+        // innerText is visibility-aware, so links hidden by animation wrappers
+        // with visible children still surface, and truly hidden ones read empty.
+        const text = (a.innerText || a.getAttribute("aria-label") || "")
+          .replace(/\s+/g, " ").trim().slice(0, 150);
         const href = a.href;
         if (!text || !href || href.startsWith("javascript:")) continue;
         if (needle && !text.toLowerCase().includes(needle) && !href.toLowerCase().includes(needle))
