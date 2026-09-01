@@ -97,7 +97,55 @@ anybridge serve https://example.com          # WebMCP tools + built-ins
 anybridge serve https://example.com --no-builtins   # only the site's own tools
 ```
 
-### Use it from Python
+## Import it as a library
+
+No subprocess, no config file: open a site and get tools your framework already understands. One browser backs the whole session, so calls share page state.
+
+**LangChain / LangGraph** (`pip install anybridge[langchain]`)
+
+```python
+from anybridge import BridgeSession
+from langgraph.prebuilt import create_react_agent
+
+async with BridgeSession("https://www.bauzaar.it/") as site:
+    agent = create_react_agent("anthropic:claude-sonnet-5", site.langchain_tools())
+    result = await agent.ainvoke(
+        {"messages": [("user", "Find dry food for a sterilised cat and compare prices")]}
+    )
+```
+
+**Claude API**
+
+```python
+from anthropic import AsyncAnthropic
+from anybridge import BridgeSession
+
+async with BridgeSession("https://example.com") as site:
+    message = await AsyncAnthropic().messages.create(
+        model="claude-sonnet-5",
+        max_tokens=1024,
+        tools=site.anthropic_tools(),
+        messages=[{"role": "user", "content": "What does this site sell?"}],
+    )
+    # then run each tool_use block through: await site.call(block.name, block.input)
+```
+
+**OpenAI / GPT**
+
+```python
+tools = site.openai_tools()          # function-calling schemas
+text = await site.call(name, args)   # dispatch a call the model asked for
+```
+
+**Any other framework** — CrewAI, LlamaIndex, Pydantic AI, your own loop:
+
+```python
+site.tool_specs()   # [{"name", "description", "input_schema"}, ...] plain dicts
+await site.call("read_page", {})     # returns text
+site.page                            # the raw browser session, if you need more
+```
+
+### Lower level
 
 ```python
 from anybridge import PageBridge
