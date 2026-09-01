@@ -1,7 +1,8 @@
 """Headless page session: captures WebMCP tools and offers universal page operations."""
 
 import asyncio
-import json
+import subprocess
+import sys
 from pathlib import Path
 
 from playwright.async_api import Error
@@ -36,16 +37,11 @@ class PageBridge:
         self._browser = None
         self._context = None
         self._page = None
+        self._installed = False
 
     async def start(self, settle: float = 1.0):
         self._pw = await async_playwright().start()
-        try:
-            # Full Chromium in new-headless mode: fewer sites detect it as a bot.
-            self._browser = await self._pw.chromium.launch(
-                channel="chromium", headless=self.headless
-            )
-        except Error:
-            self._browser = await self._pw.chromium.launch(headless=self.headless)
+        self._browser = await self._launch_chromium()
         # Some sites refuse the default HeadlessChrome user agent.
         ua = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -62,6 +58,48 @@ class PageBridge:
         await self._goto(self.url)
         await asyncio.sleep(settle)
         return self
+
+    async def _launch_chromium(self):
+        """Launch Chromium, downloading it on first run if it isn't installed yet.
+
+        Full Chromium ("chromium" channel) in new-headless mode is detected as a
+        bot far less often than the bundled headless shell, so it is preferred.
+        """
+        for browser_args in ({"channel": "chromium"}, {}):
+            try:
+                return await self._pw.chromium.launch(headless=self.headless, **browser_args)
+            except Error as exc:
+                message = str(exc)
+                if "playwright install" in message or "Executable doesn't exist" in message:
+                    if not self._installed:
+                        self._install_browser()
+                        self._installed = True
+                    try:
+                        return await self._pw.chromium.launch(
+                            headless=self.headless, **browser_args
+                        )
+                    except Error as retry_exc:
+                        message = str(retry_exc)
+                if "shared libraries" in message or "error while loading" in message:
+                    raise RuntimeError(
+                        "Chromium is installed but the system is missing libraries it needs.\n"
+                        "On Debian/Ubuntu run:\n"
+                        "    sudo playwright install-deps chromium\n"
+                        "or, without sudo, install them for your user and set LD_LIBRARY_PATH."
+                    ) from exc
+                if browser_args:
+                    continue  # fall back to the bundled headless shell
+                raise
+        raise RuntimeError("Could not launch Chromium.")
+
+    def _install_browser(self):
+        """Run `playwright install chromium` so first use needs no manual setup."""
+        print("anybridge: downloading Chromium (first run only)...", file=sys.stderr)
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=False,
+            stdout=sys.stderr,
+        )
 
     def _on_new_page(self, page):
         self._page = page

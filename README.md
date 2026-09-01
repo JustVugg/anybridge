@@ -16,12 +16,53 @@ Every call runs inside the real page — the site's own JavaScript does the work
               + universal read/navigate/forms/click on any site
 ```
 
-## Install
+## Give it to an agent
+
+One line, nothing to install — [uv](https://docs.astral.sh/uv/) fetches anybridge, and anybridge downloads its browser on first run:
+
+**Claude Code**
 
 ```bash
-pip install anybridge          # or: pip install -e . from a clone
-playwright install chromium
+claude mcp add mysite -- uvx anybridge serve https://example.com
 ```
+
+**Claude Desktop** (`claude_desktop_config.json`) — and the same shape works for any MCP client:
+
+```json
+{
+  "mcpServers": {
+    "mysite": {
+      "command": "uvx",
+      "args": ["anybridge", "serve", "https://example.com"]
+    }
+  }
+}
+```
+
+**GPT / OpenAI Agents SDK**
+
+```python
+from agents import Agent, Runner
+from agents.mcp import MCPServerStdio
+
+async with MCPServerStdio(
+    params={"command": "uvx", "args": ["anybridge", "serve", "https://example.com"]}
+) as site:
+    agent = Agent(name="assistant", mcp_servers=[site])
+    result = await Runner.run(agent, "What does this site sell, and what are the prices?")
+```
+
+That is the whole setup. The agent now has `read_page`, `navigate`, `list_links`, `list_forms`, `submit_form`, `type_text` and `click` on that site, plus any WebMCP tools the site registers.
+
+## Install
+
+Only needed to use the CLI directly:
+
+```bash
+pip install anybridge     # or: pip install -e . from a clone
+```
+
+Chromium downloads itself on first run. On a bare Linux box its system libraries may be missing — `sudo playwright install-deps chromium` installs them.
 
 ## Usage
 
@@ -54,42 +95,6 @@ Serve the page as an MCP server (stdio):
 ```bash
 anybridge serve https://example.com          # WebMCP tools + built-ins
 anybridge serve https://example.com --no-builtins   # only the site's own tools
-```
-
-### Works with any agent
-
-anybridge speaks plain MCP over stdio, so any MCP client can drive the site — Claude, GPT, open-source frameworks, your own agent loop.
-
-**Claude Code:**
-
-```bash
-claude mcp add mysite -- anybridge serve https://example.com
-```
-
-**Claude Desktop** (`claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "mysite": {
-      "command": "anybridge",
-      "args": ["serve", "https://example.com"]
-    }
-  }
-}
-```
-
-**GPT via OpenAI Agents SDK:**
-
-```python
-from agents import Agent, Runner
-from agents.mcp import MCPServerStdio
-
-async with MCPServerStdio(
-    params={"command": "anybridge", "args": ["serve", "https://example.com"]}
-) as site:
-    agent = Agent(name="assistant", mcp_servers=[site])
-    result = await Runner.run(agent, "Add a task called 'ship v1'")
 ```
 
 ### Use it from Python
