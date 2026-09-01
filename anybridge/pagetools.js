@@ -186,12 +186,18 @@
             if (el.type !== "password" && el.value) f.value = String(el.value).slice(0, 100);
             return f;
           });
+        // getAttribute, not property access: inputs named id/action/method
+        // shadow the form's native properties (Shopify has <input name="id">).
+        let action = form.getAttribute("action") || "";
+        try {
+          action = action ? new URL(action, location.href).href : location.href;
+        } catch {}
         return {
           index,
-          id: form.id || "",
+          id: form.getAttribute("id") || "",
           name: form.getAttribute("name") || "",
-          method: (form.method || "get").toUpperCase(),
-          action: form.action || "",
+          method: (form.getAttribute("method") || "get").toUpperCase(),
+          action,
           fields,
         };
       });
