@@ -1,107 +1,92 @@
 # anybridge
 
-**Expose any web page to any agent.**
+**Any website, within reach of any agent.**
 
-anybridge opens a page in a real browser and re-exposes it as a **standard MCP server**, so anything that speaks MCP — Claude, GPT via the OpenAI Agents SDK, any MCP client — can drive the site. Tools come from two sources, merged:
+<p align="center">
+  <img src="docs/tui.png" alt="The anybridge TUI: pick an agent and launch it" width="760">
+</p>
 
-1. **WebMCP tools the site registers.** [WebMCP](https://github.com/webmachinelearning/webmcp) lets a website declare typed, callable tools for AI agents (`navigator.modelContext.registerTool` / `document.modelContext`). It is in origin trial in Chrome — but today only Gemini in Chrome can consume those tools. anybridge captures them and hands them to every other agent.
-2. **Built-in universal tools** that work on *any* site, WebMCP or not: `read_page`, `navigate`, `list_links`, `list_forms`, `submit_form`, `type_text`, `click`.
+anybridge turns a website into tools an AI agent can actually use. It opens the
+page in a real browser and re-exposes it over the **Model Context Protocol**, so
+Claude Code, Codex, or anything else that speaks MCP can read the page, fill its
+forms, click its buttons and read its PDFs — including sites built long before
+agents existed.
 
-Every call runs inside the real page — the site's own JavaScript does the work.
+Run `anybridge`, pick your agent, paste a URL into it. That is the whole flow.
 
-```
-              site JS registers WebMCP tools
-  web page ─────────────────────────────────► anybridge ──► MCP server ──► any agent
-           ◄───────────────────────────────── tool calls executed in the live page
-              + universal read/navigate/forms/click on any site
-```
+## Why it exists
 
-## Give it to an agent
+[WebMCP](https://github.com/webmachinelearning/webmcp) lets a website declare
+typed, callable tools for AI agents. It is real and already deployed — Shopify
+ships it on storefronts today — but only Gemini in Chrome can consume those
+tools. anybridge captures them and hands them to **every other agent**.
 
-One line, nothing to install — [uv](https://docs.astral.sh/uv/) fetches anybridge, and anybridge downloads its browser on first run:
+And when a site has no WebMCP at all, which is almost every site, anybridge
+generates the bridge itself from the live DOM. A 2013 SharePoint portal and a
+modern Shopify store come out the same way: as a list of tools.
 
-**Claude Code**
+## What an agent gets
+
+Two sources of tools, merged, with the site's own taking precedence:
+
+**The site's native WebMCP tools**, namespaced so a page can never shadow a
+built-in — `search_catalog`, `update_cart`, whatever the site registered.
+
+**Forty universal tools that work on any page.** The ones that matter most:
+
+| | |
+|---|---|
+| `navigate`, `read_page`, `smart_read` | open and read, with PDFs returned as page-marked text |
+| `snapshot` | a compact semantic tree with stable refs (`@e12`) instead of raw HTML |
+| `click_ref`, `fill_ref`, `select_ref`, `press_key` | act on those refs |
+| `extract`, `screenshot`, `wait_for` | structured data, images, synchronisation |
+| `save_site`, `save_profile`, `save_workflow` | remember a site, a login, a recorded flow |
+| `open_repository` | clone a Git remote and hand back a local path |
+
+## Install
+
+Not on PyPI yet — clone it and install in place:
 
 ```bash
-claude mcp add mysite -- uvx anybridge serve https://example.com
+git clone https://github.com/JustVugg/anybridge.git
+cd anybridge
+pip install -e .
 ```
 
-**Claude Desktop** (`claude_desktop_config.json`) — and the same shape works for any MCP client:
+Python 3.10 or newer. Chromium downloads itself on first run; on a bare Linux
+box `sudo playwright install-deps chromium` supplies its system libraries.
+
+## Use it
+
+**Through the TUI** — pick an agent and anybridge launches it in a second
+terminal, already wired to the bridge:
+
+```bash
+anybridge
+```
+
+**Or wire it into an MCP client yourself:**
+
+```bash
+claude mcp add anybridge -- anybridge serve
+```
 
 ```json
 {
   "mcpServers": {
-    "mysite": {
-      "command": "uvx",
-      "args": ["anybridge", "serve", "https://example.com"]
-    }
+    "anybridge": { "command": "anybridge", "args": ["serve"] }
   }
 }
 ```
 
-**GPT / OpenAI Agents SDK**
-
-```python
-from agents import Agent, Runner
-from agents.mcp import MCPServerStdio
-
-async with MCPServerStdio(
-    params={"command": "uvx", "args": ["anybridge", "serve", "https://example.com"]}
-) as site:
-    agent = Agent(name="assistant", mcp_servers=[site])
-    result = await Runner.run(agent, "What does this site sell, and what are the prices?")
-```
-
-That is the whole setup. The agent now has `read_page`, `navigate`, `list_links`, `list_forms`, `submit_form`, `type_text` and `click` on that site, plus any WebMCP tools the site registers.
-
-## Install
-
-Only needed to use the CLI directly:
+**Or from the shell, with no agent at all:**
 
 ```bash
-pip install anybridge     # or: pip install -e . from a clone
-```
-
-Chromium downloads itself on first run. On a bare Linux box its system libraries may be missing — `sudo playwright install-deps chromium` installs them.
-
-## Usage
-
-List the tools available on a page (the site's WebMCP tools plus the built-ins):
-
-```bash
-anybridge list https://example.com
-```
-
-Call tools directly from the shell — works on real sites today:
-
-```bash
-# read any page as markdown
+anybridge list https://www.bauzaar.it/     # the site's WebMCP tools plus the built-ins
 anybridge call https://en.wikipedia.org/wiki/Rome read_page
-
-# search Wikipedia by filling its real search form
-anybridge call https://en.wikipedia.org/wiki/Main_Page submit_form \
-  --args '{"form": 0, "fields": {"search": "Model Context Protocol"}}'
-
-# type into a React SPA input (no <form> needed) and press Enter
-anybridge call https://demo.playwright.dev/todomvc/ type_text \
-  --args '{"target": "What needs to be done?", "text": "hello", "press_enter": true}'
-
-# call a WebMCP tool the site registered
-anybridge call https://example.com add_task --args '{"title": "ship v1"}'
 ```
 
-Serve the page as an MCP server (stdio):
-
-```bash
-anybridge serve https://example.com          # WebMCP tools + built-ins
-anybridge serve https://example.com --no-builtins   # only the site's own tools
-```
-
-## Import it as a library
-
-No subprocess, no config file: open a site and get tools your framework already understands. One browser backs the whole session, so calls share page state.
-
-**LangChain / LangGraph** (`pip install anybridge[langchain]`)
+**Or as a library**, when you want tools your framework already understands:
 
 ```python
 from anybridge import BridgeSession
@@ -109,78 +94,42 @@ from langgraph.prebuilt import create_react_agent
 
 async with BridgeSession("https://www.bauzaar.it/") as site:
     agent = create_react_agent("anthropic:claude-sonnet-5", site.langchain_tools())
-    result = await agent.ainvoke(
-        {"messages": [("user", "Find dry food for a sterilised cat and compare prices")]}
-    )
 ```
 
-**Claude API**
+`site.anthropic_tools()`, `site.openai_tools()` and `site.tool_specs()` cover the
+other frameworks. One browser backs the whole session, so calls share page state.
 
-```python
-from anthropic import AsyncAnthropic
-from anybridge import BridgeSession
+## How it holds up
 
-async with BridgeSession("https://example.com") as site:
-    message = await AsyncAnthropic().messages.create(
-        model="claude-sonnet-5",
-        max_tokens=1024,
-        tools=site.anthropic_tools(),
-        messages=[{"role": "user", "content": "What does this site sell?"}],
-    )
-    # then run each tool_use block through: await site.call(block.name, block.input)
-```
+**It picks the cheapest route that works.** Plain HTTP first, then optional
+Lightpanda, and Chromium only when the page truly needs JavaScript or state.
 
-**OpenAI / GPT**
+**It stays available.** Every route is bounded by one shared deadline. If the
+live site fails, anybridge degrades to a durable cache and finally to the
+Internet Archive — and says so, instead of pretending an action succeeded.
 
-```python
-tools = site.openai_tools()          # function-calling schemas
-text = await site.call(name, args)   # dispatch a call the model asked for
-```
+**PDFs are text, never screenshots.** Chromium's PDF viewer exposes an empty
+DOM, so anybridge extracts the document, marks every page, and lets an agent
+ask for `pages="12-15"` of a long one.
 
-**Any other framework** — CrewAI, LlamaIndex, Pydantic AI, your own loop:
-
-```python
-site.tool_specs()   # [{"name", "description", "input_schema"}, ...] plain dicts
-await site.call("read_page", {})     # returns text
-site.page                            # the raw browser session, if you need more
-```
-
-### Lower level
-
-```python
-from anybridge import PageBridge
-
-async with PageBridge("https://example.com") as bridge:
-    tools = await bridge.wait_for_tools()
-    result = await bridge.call_tool("add_task", {"title": "ship v1"})
-```
-
-## Try the demo
-
-`examples/demo-site/index.html` is a task-list page that registers three WebMCP tools:
-
-```bash
-anybridge list "file://$PWD/examples/demo-site/index.html"
-anybridge call "file://$PWD/examples/demo-site/index.html" add_task --args '{"title": "hello"}'
-```
-
-## How it works
-
-1. Playwright launches full Chromium in new-headless mode (less likely to be blocked as a bot), with automatic retries on transient network errors.
-2. Two scripts are injected before any page script runs: a shim defining `navigator.modelContext` / `document.modelContext` (wrapping the native ones where they exist), and the page-tools helpers for DOM extraction and form handling.
-3. Every `registerTool` / `provideContext` call lands in a registry inside the page. The MCP server mirrors that registry, merged with the built-in tools (site names win collisions).
-4. Each tool call is evaluated inside the live page: WebMCP calls invoke the site's own `execute` function; built-ins read the DOM, fill real form fields (with native setters, so React apps see the input), click real elements, and follow navigations and new tabs.
+**Untrusted pages stay in their box.** Remote sessions get their own browser,
+private-network targets are blocked including across redirects, saved profiles
+are encrypted and scoped to one origin, and recorded workflows never store the
+values that were typed into them.
 
 ## Limits
 
-Sites behind aggressive anti-bot walls (CAPTCHA, some search engines' bot checks) may still refuse a headless browser — anybridge reports what the page actually served, so the agent sees the refusal instead of a hallucination. Cookie banners are handled by the agent itself with `click("Accept all")`.
+Aggressive anti-bot walls can still refuse a headless browser. When that
+happens anybridge reports what the page actually served and continues read-only
+from another source — it never invents a completed purchase, login or form
+submission. Archived pages are historical and cannot be used for live actions.
 
-## Roadmap
+## Development
 
-- Streamable HTTP transport (one bridge, many agents)
-- Sessions with login state (persistent browser profiles)
-- Tool change notifications (pages that register tools dynamically per view)
-- Browserless fast path for static pages
+```bash
+python -m pytest tests/                                              # 49 tests
+ANYBRIDGE_SKIP_BROWSER_TESTS=1 python -m unittest discover -s tests   # without a browser
+```
 
 ## License
 

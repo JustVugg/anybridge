@@ -593,7 +593,7 @@
     <div class="cmd-row rise">
       <span class="cmd">
         <span class="prompt">$</span>
-        <code id="hero-cmd">uvx anybridge serve https://your-site.com</code>
+        <code id="hero-cmd">anybridge serve https://your-site.com</code>
         <button class="copy-btn" type="button" data-copy="#hero-cmd">copy</button>
       </span>
       <span class="hero-note">Nothing to install. The browser downloads itself on first run.</span>
@@ -743,7 +743,7 @@ document.<span class="hl">modelContext</span>.registerTool({
         <div class="panel" role="tabpanel" id="p-claude" aria-labelledby="tab-claude">
           <p>Add the site as a server. Its tools appear in the next session.</p>
           <pre class="code"><span class="c"># one command, nothing installed beforehand</span>
-claude mcp add mysite -- uvx anybridge serve <span class="s">https://your-site.com</span></pre>
+claude mcp add mysite -- anybridge serve <span class="s">https://your-site.com</span></pre>
         </div>
 
         <div class="panel" role="tabpanel" id="p-desktop" aria-labelledby="tab-desktop" hidden>
@@ -751,8 +751,8 @@ claude mcp add mysite -- uvx anybridge serve <span class="s">https://your-site.c
           <pre class="code">{
   <span class="s">"mcpServers"</span>: {
     <span class="s">"mysite"</span>: {
-      <span class="s">"command"</span>: <span class="s">"uvx"</span>,
-      <span class="s">"args"</span>: [<span class="s">"anybridge"</span>, <span class="s">"serve"</span>, <span class="s">"https://your-site.com"</span>]
+      <span class="s">"command"</span>: <span class="s">"anybridge"</span>,
+      <span class="s">"args"</span>: [<span class="s">"serve"</span>, <span class="s">"https://your-site.com"</span>]
     }
   }
 }</pre>
@@ -883,12 +883,12 @@ anybridge call <span class="s">https://en.wikipedia.org/wiki/Main_Page</span> su
       <div class="cmd-row">
         <span class="cmd">
           <span class="prompt">$</span>
-          <code id="pip-cmd">pip install anybridge</code>
+          <code id="pip-cmd">pip install git+https://github.com/JustVugg/anybridge.git</code>
           <button class="copy-btn" type="button" data-copy="#pip-cmd">copy</button>
         </span>
         <span class="cmd">
           <span class="prompt">$</span>
-          <code id="lc-cmd">pip install "anybridge[langchain]"</code>
+          <code id="lc-cmd">pip install "anybridge[langchain] @ git+https://github.com/JustVugg/anybridge.git"</code>
           <button class="copy-btn" type="button" data-copy="#lc-cmd">copy</button>
         </span>
       </div>

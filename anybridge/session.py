@@ -14,6 +14,12 @@ import json
 
 from .browser import PageBridge
 from .builtins import BUILTIN_TOOLS, call_builtin
+from .engines import AdaptiveReader
+from .profiles import ProfileStore
+from .repositories import RepositoryManager, RepositoryStore
+from .sites import SiteStore
+from .webmcp import publish_tools
+from .workflows import WorkflowStore
 
 
 def result_to_text(result) -> str:
@@ -38,17 +44,32 @@ class BridgeSession:
     def __init__(self, url: str, headless: bool = True, builtins: bool = True):
         self.url = url
         self.builtins = builtins
-        self._bridge = PageBridge(url, headless=headless)
+        self._bridge = PageBridge(headless=headless)
+        self._continuity_content = ""
         self._site_tools: list[dict] = []
+        self._site_mapping: dict[str, str] = {}
+        self._sites = SiteStore()
+        self._repositories = RepositoryStore()
+        self._repository_manager = RepositoryManager()
+        self._profiles = ProfileStore()
+        self._workflows = WorkflowStore()
+        self._adaptive = AdaptiveReader()
 
-    async def open(self, wait: float = 3.0) -> "BridgeSession":
-        await self._bridge.start()
-        # Give a WebMCP page a moment to register its tools; sites without it
-        # simply return an empty list and the built-ins carry the session.
-        self._site_tools = await self._bridge.wait_for_tools(timeout=wait)
+    async def open(self, wait: float = 30.0) -> "BridgeSession":
+        self._continuity_content = await self._adaptive.navigate(
+            self.url, bridge=self._bridge
+        )
+        raw = await self._bridge.list_tools() if self._bridge.started else []
+        current = (
+            await self._bridge.current_site()
+            if self._bridge.started
+            else {"url": self.url}
+        )
+        self._site_tools, self._site_mapping = publish_tools(raw, current.get("url"))
         return self
 
     async def close(self):
+        await self._adaptive.close()
         await self._bridge.close()
 
     async def __aenter__(self):
@@ -64,10 +85,10 @@ class BridgeSession:
 
     def tool_specs(self) -> list[dict]:
         """Tools as plain dicts: name, description, input_schema (JSON Schema)."""
-        site_names = {t["name"] for t in self._site_tools}
-        tools = list(self._site_tools)
+        tools = []
         if self.builtins:
-            tools += [t for t in BUILTIN_TOOLS if t["name"] not in site_names]
+            tools += list(BUILTIN_TOOLS)
+        tools += list(self._site_tools)
         return [
             {
                 "name": t["name"],
@@ -79,14 +100,35 @@ class BridgeSession:
 
     async def refresh(self):
         """Re-read the page's WebMCP tools (they can change as the page navigates)."""
-        self._site_tools = await self._bridge.list_tools()
+        current = await self._bridge.current_site()
+        self._site_tools, self._site_mapping = publish_tools(
+            await self._bridge.discover_tools(), current.get("url")
+        )
 
     async def call(self, name: str, args: dict | None = None) -> str:
         """Run one tool in the live page and return its result as text."""
         args = args or {}
-        if name in {t["name"] for t in self._site_tools}:
-            return result_to_text(await self._bridge.call_tool(name, args))
-        return result_to_text(await call_builtin(self._bridge, name, args))
+        if name == "read_page" and not self._bridge.started:
+            return self._continuity_content
+        if self.builtins and name in {tool["name"] for tool in BUILTIN_TOOLS}:
+            return result_to_text(
+                await call_builtin(
+                    self._bridge,
+                    name,
+                    args,
+                    self._sites,
+                    self._repositories,
+                    self._repository_manager,
+                    self._profiles,
+                    self._workflows,
+                    self._adaptive,
+                )
+            )
+        if name in self._site_mapping:
+            return result_to_text(
+                await self._bridge.call_tool(self._site_mapping[name], args)
+            )
+        raise ValueError(f'Unknown AnyBridge tool: "{name}".')
 
     # ---- framework adapters ----
 
