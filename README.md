@@ -12,7 +12,7 @@ Claude Code, Codex, or anything else that speaks MCP can read the page, fill its
 forms, click its buttons and read its PDFs — including sites built long before
 agents existed.
 
-Run `anybridge`, pick your agent, paste a URL into it. That is the whole flow.
+Run it, pick your agent, paste a URL into it. That is the whole flow.
 
 ## Why it exists
 
@@ -43,9 +43,20 @@ built-in — `search_catalog`, `update_cart`, whatever the site registered.
 | `save_site`, `save_profile`, `save_workflow` | remember a site, a login, a recorded flow |
 | `open_repository` | clone a Git remote and hand back a local path |
 
-## Install
+## Run it
 
-Not on PyPI yet — clone it and install in place:
+One command, nothing installed. [uv](https://docs.astral.sh/uv/) fetches
+anybridge and its Python for you, and anybridge downloads its browser on first
+run:
+
+```bash
+uvx --from git+https://github.com/JustVugg/anybridge anybridge
+```
+
+That opens the TUI: pick your agent, and anybridge launches it in a second
+terminal already wired to the bridge.
+
+To keep it around, install it properly (Python 3.10 or newer):
 
 ```bash
 git clone https://github.com/JustVugg/anybridge.git
@@ -53,19 +64,12 @@ cd anybridge
 pip install -e .
 ```
 
-Python 3.10 or newer. Chromium downloads itself on first run; on a bare Linux
-box `sudo playwright install-deps chromium` supplies its system libraries.
+On a bare Linux box `sudo playwright install-deps chromium` supplies Chromium's
+system libraries. Not on PyPI yet.
 
 ## Use it
 
-**Through the TUI** — pick an agent and anybridge launches it in a second
-terminal, already wired to the bridge:
-
-```bash
-anybridge
-```
-
-**Or wire it into an MCP client yourself:**
+**Wire it into an MCP client:**
 
 ```bash
 claude mcp add anybridge -- anybridge serve
