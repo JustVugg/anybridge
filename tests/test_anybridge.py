@@ -408,7 +408,10 @@ class BridgeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "open_repository",
                 {"url": "https://github.com/acme/demo.git"},
             )
-        self.assertIn(str(prepared.path), result)
+        # The result is JSON: on Windows the path arrives with escaped
+        # backslashes, so compare the decoded field, not the raw string.
+        payload = json.loads(result)
+        self.assertEqual(payload["path"], str(prepared.path))
         self.assertIn("native file", result)
         self.assertEqual(self.bridge.start_count, 0)
 
