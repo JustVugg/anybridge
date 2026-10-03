@@ -5,11 +5,26 @@ import importlib.util
 from urllib.parse import urlsplit
 
 from .browser import PageBridge
+from .action_policy import assess_action
+from .checkpoint import CheckpointStore, decide_resume, make_checkpoint
 from .engines import AdaptiveReader
 from .profiles import ProfileStore
 from .repositories import PreparedRepository, RepositoryManager, RepositoryStore
 from .sites import SiteStore
 from .webmcp import publish_tools
+from .tool_trust import ToolTrustRegistry
+from .content_boundary import wrap_tool_output
+from .webmcp_security import evaluate_webmcp_security
+from .webmcp_security_evolution import DefenseObservation, SecurityEvolutionStore, evolve_security_capabilities, evaluate_and_evolve_security
+from .webmcp_replay import SecurityReplayCase, SecurityReplayOutcome, replay_security_corpus
+from .webmcp_defense_selection import select_defense
+from .webmcp_capability_graduation import CapabilityGraduationStore
+from .capability_transfer import CapabilityTransferStore, TransferObservation
+from .capability_curriculum import CapabilityCurriculumStore, CurriculumCandidate, CurriculumObservation
+from .capability_calibration import CapabilityCalibrationStore, CalibrationObservation
+from .holdout_generation import HoldoutGenerator, BenchmarkObservation
+from .holdout_benchmark import HoldoutBenchmark
+from .capability_promotion import CanaryEvidence, CapabilityPromotionStore, CohortEvidence, HoldoutEvidence
 from .workflows import WorkflowStore
 
 BUILTIN_TOOLS = [
@@ -216,9 +231,70 @@ BUILTIN_TOOLS = [
         },
     },
     {
+        "name": "assess_action",
+        "description": "Classify an action's risk and whether automatic retry, revalidation, confirmation, or denial is appropriate. Classification is advisory and does not execute the action.",
+        "inputSchema": {"type": "object", "properties": {
+            "action": {"type": "string"},
+            "target": {"type": "string"},
+            "consequential": {"type": "boolean"}
+        }, "required": ["action"]},
+    },
+    {
+        "name": "save_checkpoint",
+        "description": "Save a crash-safe execution checkpoint. Checkpoints are resume boundaries, not permission to replay side effects.",
+        "inputSchema": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "Local checkpoint JSON path"},
+            "execution_id": {"type": "string"},
+            "checkpoint_id": {"type": "string"},
+            "step_index": {"type": "integer"},
+            "action": {"type": "string"},
+            "target": {"type": "string"},
+            "expected": {},
+            "observed": {},
+            "safe_to_resume": {"type": "boolean", "default": false}
+        }, "required": ["path", "execution_id", "checkpoint_id", "step_index", "action"]},
+    },
+    {
+        "name": "resume_checkpoint",
+        "description": "Inspect a saved checkpoint and decide whether resume is safe after current-state revalidation.",
+        "inputSchema": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "current_url": {"type": "string"},
+            "current_target_exists": {"type": "boolean"},
+            "recovery_confidence": {"type": "number"}
+        }, "required": ["path"]},
+    },
+    {
         "name": "reset_session",
         "description": "Recover the AnyBridge browser after a crash or broken page.",
         "inputSchema": {"type": "object", "properties": {},},
+    },
+    {
+        "name": "network_policy",
+        "description": "Show private-site isolation, trusted hosts, and third-party dependency hosts blocked during this session. No network data is sent.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "revoke_network_host",
+        "description": (
+            "Revoke an explicitly trusted dependency hostname for the current browser session. "
+            "The private-site origin itself cannot be revoked until the session ends."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Hostname previously trusted for this session"}
+            },
+            "required": ["host"],
+        },
+    },
+        "name": "trust_network_host",
+        "description": "Explicitly trust one blocked dependency hostname for the current browser session. Use only after the user approves that host.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"host": {"type": "string", "description": "Hostname to trust, e.g. cdn.example.com"}},
+            "required": ["host"],
+        },
     },
     {
         "name": "current_site",
@@ -231,6 +307,93 @@ BUILTIN_TOOLS = [
             "List the WebMCP tools registered by the current website. Use this after navigation "
             "if newly discovered site tools are not already visible to you."
         ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "tool_trust",
+        "description": "Inspect WebMCP tool provenance, definition drift, safety annotations, and deterministic trust state without executing the tool.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "inspect_webmcp_tool",
+        "description": "Assess one currently registered WebMCP tool for origin binding, schema/description drift, output trust, and confirmation requirements.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Raw or published WebMCP tool name"},
+                "trust": {"type": "boolean", "default": false, "description": "Record explicit caller trust for an unchanged capability"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "webmcp_security_pipeline",
+        "description": "Run AnyBridge deterministic WebMCP security evaluation through learning and capability evolution. Report only; generated cases are never executed.",
+        "inputSchema": {"type": "object", "properties": {"provider": {"type": "string"}, "origin": {"type": "string"}, "defense": {"type": "string"}, "generate_counter_cases": {"type": "boolean", "default": true}}},
+    },
+    {
+        "name": "webmcp_capability_graduation",
+        "description": "Evaluate evidence-gated WebMCP security capability graduation state. Report only; no replay or tool execution.",
+        "inputSchema": {"type": "object", "properties": {"observations": {"type": "array"}, "cohort": {"type": "string", "enum": ["evidence","holdout","canary"]}},"required":["observations","cohort"]},
+    },
+    {
+        "name": "webmcp_defense_decision",
+        "description": "Select and compare WebMCP defenses from caller-supplied security outcomes. Report only; no tool or attack execution.",
+        "inputSchema": {"type": "object", "properties": {"observations": {"type": "array"}, "attack_class": {"type": "string"}, "provider": {"type": "string"}, "origin": {"type": "string"}, "schema_hash": {"type": "string"}},"required":["observations","attack_class"]},
+    },
+    {
+        "name": "webmcp_security_replay",
+        "description": "Process caller-supplied WebMCP replay outcomes through security learning and evolution.",
+        "inputSchema": {"type": "object", "properties": {"cases": {"type": "array"}, "outcomes": {"type": "array"}, "generate_counter_cases": {"type": "boolean", "default": true}}},
+    },
+    {
+        "name": "webmcp_security_evolution",
+        "description": "Analyze caller-supplied WebMCP security outcomes to learn defense effectiveness, detect regressions, evolve bounded counter-cases, and manage regression-seed lifecycle. Does not execute generated cases.",
+        "inputSchema": {"type": "object", "properties": {"observations": {"type": "array"}, "generate_counter_cases": {"type": "boolean", "default": true}}, "required": ["observations"]},
+    },
+    {
+        "name": "capability_cross_domain_transfer",
+        "description": "Abstract verified capabilities and evaluate deterministic cross-domain transfer hypotheses from caller-supplied outcomes. Report only; holdout and canary execution remain caller-owned.",
+        "inputSchema": {"type": "object", "properties": {
+            "primitives": {"type": "array"},
+            "target_domain": {"type": "string"},
+            "target_capability_class": {"type": "string"},
+            "source_domain": {"type": "string"},
+            "observations": {"type": "array"}
+        }, "required": ["primitives", "target_domain", "target_capability_class"]},
+    },
+    {
+        "name": "capability_curriculum",
+        "description": "Rank and select the next capability-validation candidates from novelty, uncertainty, failure risk, evidence value, cost, transfer gaps, and realized outcomes. Report only; execution remains caller-owned.",
+        "inputSchema": {"type": "object", "properties": {
+            "candidates": {"type": "array"},
+            "observations": {"type": "array"},
+            "budget": {"type": "integer", "default": 3}
+        }, "required": ["candidates"]},
+    },
+    {
+        "name": "capability_confidence_calibration",
+        "description": "Calibrate predicted capability confidence against caller-supplied holdout outcomes. Report only; no execution or authorization.",
+        "inputSchema": {"type": "object", "properties": {"observations": {"type": "array"}, "capability_id": {"type": "string"}},"required":["observations"]},
+    },
+    {
+        "name": "capability_holdout_generation",
+        "description": "Generate bounded provenance-marked holdout cases from capability metadata and accept only independently scored outcomes. Generated cases are data, never executable instructions.",
+        "inputSchema": {"type":"object","properties":{"capabilities":{"type":"array"},"target_domains":{"type":"array"},"observations":{"type":"array"}},"required":["capabilities","target_domains"]},
+    },
+    {
+        "name": "capability_holdout_benchmark",
+        "description": "Aggregate independently scored generated holdouts into benchmark evidence. Benchmark results never auto-promote capabilities.",
+        "inputSchema": {"type":"object","properties":{"cases":{"type":"array"},"outcomes":{"type":"array"}},"required":["cases","outcomes"]},
+    },
+    {
+        "name": "capability_promotion_decision",
+        "description": "Evaluate caller-supplied independent holdout and canary evidence for capability promotion or rollback. Does not execute or authorize the capability.",
+        "inputSchema": {"type":"object","properties":{"holdout":{"type":"object"},"cohorts":{"type":"array"},"benchmark_results":{"type":"array"},"canary":{"type":"array"}},"required":[]},
+    },
+    {
+        "name": "webmcp_security_evaluation",
+        "description": "Run the deterministic WebMCP adversarial regression corpus against AnyBridge quarantine, provenance, and action-confirmation boundaries. Does not execute page tools.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -365,6 +528,18 @@ BUILTIN_TOOLS = [
             "properties": {"name": {"type": "string"}, "variables": {"type": "object"}},
             "required": ["name"],
         },
+    },
+    {
+        "name": "run_bdd",
+        "description": "Execute a Gherkin feature file through the active browser provider and return scenario/step results.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string", "description": "Feature file path or complete Gherkin text"},
+                "variables": {"type": "object"}
+            },
+            "required": ["feature"]
+        }
     },
     {
         "name": "list_workflows",
@@ -556,8 +731,47 @@ async def call_builtin(
         )
     if name == "screenshot":
         return await bridge.screenshot(full_page=bool(args.get("full_page")))
+    if name == "assess_action":
+        result = assess_action(
+            str(args["action"]),
+            target=args.get("target"),
+            consequential=args.get("consequential"),
+        )
+        return json.dumps(result.__dict__, indent=2, ensure_ascii=False)
+    if name == "save_checkpoint":
+        current = await bridge.current_site()
+        checkpoint = make_checkpoint(
+            execution_id=str(args["execution_id"]),
+            checkpoint_id=str(args["checkpoint_id"]),
+            step_index=int(args["step_index"]),
+            action=str(args["action"]),
+            target=args.get("target"),
+            url=current.get("url"),
+            expected=args.get("expected"),
+            observed=args.get("observed"),
+            evidence={"site": current},
+            safe_to_resume=bool(args.get("safe_to_resume", False)),
+        )
+        CheckpointStore(str(args["path"])).save(checkpoint)
+        return json.dumps(checkpoint.to_dict(), indent=2, ensure_ascii=False)
+    if name == "resume_checkpoint":
+        checkpoint = CheckpointStore(str(args["path"])).load()
+        decision = decide_resume(
+            checkpoint,
+            current_url=args.get("current_url") or (await bridge.current_site()).get("url"),
+            current_target_exists=args.get("current_target_exists"),
+            recovery_confidence=float(args.get("recovery_confidence") or 0.0),
+        )
+        return json.dumps(decision.__dict__, indent=2, ensure_ascii=False)
     if name == "reset_session":
         return await bridge.reset()
+    if name == "network_policy":
+        return json.dumps(await bridge.network_policy(), indent=2, ensure_ascii=False)
+    if name == "revoke_network_host":
+        return json.dumps(await bridge.revoke_host(str(args.get("host") or "")), indent=2, ensure_ascii=False)
+
+    if name == "trust_network_host":
+        return json.dumps(await bridge.trust_host(args["host"]), indent=2, ensure_ascii=False)
     if name == "current_site":
         return json.dumps(await bridge.current_site(), indent=2, ensure_ascii=False)
     if name == "list_webmcp_tools":
@@ -571,6 +785,346 @@ async def call_builtin(
                 "for pages and smart_read for PDF documents."
             )
         return json.dumps(tools, indent=2, ensure_ascii=False)
+    if name == "tool_trust":
+        raw_tools = await bridge.discover_tools()
+        current = await bridge.current_site()
+        registry = getattr(bridge, "_tool_trust_registry", None)
+        if registry is None:
+            registry = ToolTrustRegistry()
+            setattr(bridge, "_tool_trust_registry", registry)
+        origin = current.get("url") or ""
+        parsed = urlsplit(origin)
+        origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        assessments = []
+        for raw in raw_tools:
+            item = dict(raw)
+            item["origin"] = item.get("origin") or origin
+            assessments.append(registry.observe(item))
+        return json.dumps([item.to_dict() for item in assessments], indent=2, ensure_ascii=False)
+    if name == "inspect_webmcp_tool":
+        raw_tools = await bridge.discover_tools()
+        current = await bridge.current_site()
+        registry = getattr(bridge, "_tool_trust_registry", None)
+        if registry is None:
+            registry = ToolTrustRegistry()
+            setattr(bridge, "_tool_trust_registry", registry)
+        origin = current.get("url") or ""
+        parsed = urlsplit(origin)
+        origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        requested = str(args["name"])
+        published, mapping = publish_tools(raw_tools, current.get("url"))
+        original_name = mapping.get(requested, requested)
+        match = next((dict(tool) for tool in raw_tools if str(tool.get("name") or "") == original_name), None)
+        if match is None:
+            raise ValueError(f'No WebMCP tool named "{requested}" is registered on this page.')
+        match["origin"] = match.get("origin") or origin
+        assessment = registry.observe(match, trusted=bool(args.get("trust")))
+        return json.dumps(assessment.to_dict(), indent=2, ensure_ascii=False)
+    if name == "webmcp_security_pipeline":
+        report = evaluate_and_evolve_security(provider=args.get("provider", "playwright"), origin=args.get("origin", "https://trusted.example"), defense=args.get("defense", "content_boundary"), generate_counter_cases=bool(args.get("generate_counter_cases", True)))
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if name == "webmcp_capability_graduation":
+        store = CapabilityGraduationStore()
+        cohort = str(args.get("cohort") or "evidence")
+        observations = [DefenseObservation(str(x["attack_id"]), str(x["attack_class"]), str(x["provider"]), str(x["origin"]), str(x["schema_hash"]), str(x["defense"]), bool(x["blocked"]), float(x.get("evidence_confidence", 0.5)), x.get("latency_ms"), x.get("execution_id"), x.get("details")) for x in (args.get("observations") or []) if isinstance(x, dict)]
+        decision = None
+        for observation in observations: decision = store.observe(observation, cohort=cohort)
+        return json.dumps((decision.to_dict() if decision else {"status": "candidate", "reason": "no observations"}), indent=2, ensure_ascii=False)
+    if name == "webmcp_defense_decision":
+        observations = [DefenseObservation(str(x["attack_id"]), str(x["attack_class"]), str(x["provider"]), str(x["origin"]), str(x["schema_hash"]), str(x["defense"]), bool(x["blocked"]), float(x.get("evidence_confidence", 0.5)), x.get("latency_ms"), x.get("execution_id"), x.get("details")) for x in (args.get("observations") or []) if isinstance(x, dict)]
+        decision = select_defense(observations, attack_class=str(args["attack_class"]), provider=str(args.get("provider") or ""), origin=str(args.get("origin") or ""), schema_hash=str(args.get("schema_hash") or ""))
+        return json.dumps(decision.to_dict(), indent=2, ensure_ascii=False)
+    if name == "webmcp_security_replay":
+        cases = [SecurityReplayCase(case_id=str(x.get("case_id") or x.get("id") or ""), attack_id=str(x.get("attack_id") or x.get("id") or ""), attack_class=str(x.get("attack_class") or x.get("category") or "unknown"), provider=str(x.get("provider") or "unknown"), origin=str(x.get("origin") or ""), schema_hash=str(x.get("schema_hash") or ""), defense=str(x.get("defense") or "unknown"), payload=x.get("payload") or {}) for x in (args.get("cases") or []) if isinstance(x, dict)]
+        outcomes = [SecurityReplayOutcome(case_id=str(x.get("case_id") or ""), blocked=bool(x.get("blocked")), evidence_confidence=float(x.get("evidence_confidence", 0.5)), latency_ms=x.get("latency_ms"), execution_id=x.get("execution_id"), details=x.get("details")) for x in (args.get("outcomes") or []) if isinstance(x, dict)]
+        report = replay_security_corpus(cases, outcomes, generate_counter_cases=bool(args.get("generate_counter_cases", True)))
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if name == "webmcp_security_evolution":
+        store = SecurityEvolutionStore()
+        observations = []
+        for item in args.get("observations") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each security evolution observation must be an object.")
+            observations.append(DefenseObservation(
+                attack_id=str(item["attack_id"]), attack_class=str(item["attack_class"]),
+                provider=str(item["provider"]), origin=str(item["origin"]),
+                schema_hash=str(item["schema_hash"]), defense=str(item["defense"]),
+                blocked=bool(item["blocked"]), evidence_confidence=float(item.get("evidence_confidence", 0.5)),
+                latency_ms=item.get("latency_ms"), execution_id=item.get("execution_id"), details=item.get("details"),
+            ))
+        report = evolve_security_capabilities(observations, store=store, generate_counter_cases=bool(args.get("generate_counter_cases", True)))
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if name == "capability_cross_domain_transfer":
+        from .capability_composition import CapabilityPrimitive
+        store = CapabilityTransferStore()
+        primitives = []
+        for item in args.get("primitives") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each transfer primitive must be an object.")
+            primitives.append(CapabilityPrimitive(
+                str(item["capability_id"]), str(item["attack_class"]), str(item["defense"]),
+                int(item.get("version", 1)), float(item.get("confidence", 0.0)),
+                tuple(item.get("dependencies") or ()), tuple(item.get("compatible_with") or ()),
+                tuple(item.get("incompatible_with") or ()),
+            ))
+        store.abstract_patterns(primitives, source_domain=str(args.get("source_domain") or "source"))
+        hypotheses = store.propose(
+            target_domain=str(args["target_domain"]),
+            target_capability_class=str(args["target_capability_class"]),
+            source_domain=args.get("source_domain"),
+        )
+        decisions = []
+        for item in args.get("observations") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each transfer observation must be an object.")
+            observation = TransferObservation(
+                transfer_id=str(item["transfer_id"]),
+                passed=bool(item["passed"]),
+                holdout=bool(item.get("holdout", False)),
+                evidence_confidence=float(item.get("evidence_confidence", 0.5)),
+                source_domain=str(item.get("source_domain") or ""),
+                target_domain=str(item.get("target_domain") or ""),
+                execution_id=str(item.get("execution_id") or ""),
+                details=str(item.get("details") or ""),
+            )
+            decisions.append(store.observe(observation).to_dict())
+        return json.dumps({
+            "hypotheses": [x.to_dict() for x in hypotheses],
+            "decisions": decisions,
+            "active": [x.to_dict() for x in store.active()],
+        }, indent=2, ensure_ascii=False)
+    if name == "capability_curriculum":
+        store = CapabilityCurriculumStore()
+        for item in args.get("candidates") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each curriculum candidate must be an object.")
+            store.register(CurriculumCandidate(
+                str(item["candidate_id"]), str(item["capability_id"]), str(item.get("domain") or ""),
+                float(item.get("novelty", 0)), float(item.get("uncertainty", 0)),
+                float(item.get("failure_risk", 0)), float(item.get("evidence_value", 0)),
+                float(item.get("estimated_cost", 0)), float(item.get("transfer_gap", 0)),
+            ))
+        for item in args.get("observations") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each curriculum observation must be an object.")
+            store.observe(CurriculumObservation(
+                str(item["candidate_id"]), bool(item["passed"]), bool(item.get("holdout", False)),
+                float(item.get("evidence_confidence", 0)), float(item.get("cost", 0)),
+                float(item.get("duration_ms", 0)), str(item.get("details") or ""),
+            ))
+        decision = store.decide(budget=int(args.get("budget", 3)))
+        return json.dumps(decision.to_dict(), indent=2, ensure_ascii=False)
+    if name == "capability_confidence_calibration":
+        store = CapabilityCalibrationStore()
+        for item in args.get("observations") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each calibration observation must be an object.")
+            store.observe(CalibrationObservation(
+                str(item["capability_id"]), float(item["predicted_confidence"]),
+                bool(item["passed"]), bool(item.get("holdout", True)),
+                float(item.get("evidence_confidence", 0.0)),
+            ))
+        if args.get("capability_id"):
+            return json.dumps(store.result(str(args["capability_id"])).to_dict(), indent=2, ensure_ascii=False)
+        return json.dumps([x.to_dict() for x in store.results()], indent=2, ensure_ascii=False)
+    if name == "capability_holdout_generation":
+        from .capability_composition import CapabilityPrimitive
+        generator = HoldoutGenerator()
+        primitives = []
+        for item in args.get("capabilities") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each capability must be an object.")
+            primitives.append(CapabilityPrimitive(
+                str(item["capability_id"]), str(item["attack_class"]), str(item["defense"]),
+                int(item.get("version",1)), float(item.get("confidence",0)),
+                tuple(item.get("dependencies") or ()), tuple(item.get("compatible_with") or ()),
+                tuple(item.get("incompatible_with") or ()),
+            ))
+        cases = generator.generate(primitives, target_domains=args["target_domains"])
+        for item in args.get("observations") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each holdout observation must be an object.")
+            generator.observe(BenchmarkObservation(
+                str(item["case_id"]), bool(item["passed"]),
+                float(item.get("evidence_confidence",0)), bool(item.get("independent",True)),
+                str(item.get("execution_id") or ""), str(item.get("details") or ""),
+            ))
+        return json.dumps(generator.export(), indent=2, ensure_ascii=False)
+    if name == "capability_holdout_benchmark":
+        from .holdout_generation import HoldoutCase, BenchmarkObservation
+        benchmark = HoldoutBenchmark()
+        cases=[]
+        for item in args.get("cases") or []:
+            if not isinstance(item,dict):
+                raise ValueError("Each benchmark case must be an object.")
+            cases.append(HoldoutCase(
+                str(item["case_id"]),str(item["source_capability_id"]),str(item["target_domain"]),
+                str(item["variation"]),float(item.get("difficulty",.5)),
+                str(item.get("independence_key") or ""),bool(item.get("generated",True)),
+                bool(item.get("executable",False)),str(item.get("provenance") or "unknown"),
+            ))
+        outcomes=[]
+        for item in args.get("outcomes") or []:
+            if not isinstance(item,dict):
+                raise ValueError("Each benchmark outcome must be an object.")
+            outcomes.append(BenchmarkObservation(
+                str(item["case_id"]),bool(item["passed"]),float(item.get("evidence_confidence",0)),
+                bool(item.get("independent",True)),str(item.get("execution_id") or ""),
+                str(item.get("details") or ""),
+            ))
+        return json.dumps(benchmark.export() | {"results":[x.to_dict() for x in benchmark.ingest(cases,outcomes)]},indent=2,ensure_ascii=False)
+    if name == "capability_learning_fabric":
+        from .holdout_benchmark import BenchmarkResult
+        fabric = CapabilityLearningFabric(curriculum_budget=int(args.get("budget", 3)))
+        for item in args.get("candidates") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each curriculum candidate must be an object.")
+            fabric.register_candidates([CurriculumCandidate(
+                str(item["candidate_id"]), str(item["capability_id"]), str(item.get("domain") or ""),
+                float(item.get("novelty", 0)), float(item.get("uncertainty", 0)),
+                float(item.get("failure_risk", 0)), float(item.get("evidence_value", 0)),
+                float(item.get("estimated_cost", 0)), float(item.get("transfer_gap", 0)),
+            )])
+        outcomes = []
+        for item in args.get("outcomes") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each capability outcome must be an object.")
+            outcomes.append(CapabilityOutcome(
+                capability_id=str(item["capability_id"]),
+                predicted_confidence=float(item["predicted_confidence"]),
+                passed=bool(item["passed"]),
+                evidence_confidence=float(item.get("evidence_confidence", 0.0)),
+                holdout=bool(item.get("holdout", False)),
+                independent=bool(item.get("independent", False)),
+                domain=str(item.get("domain") or ""),
+                provider=str(item.get("provider") or ""),
+                cohort_id=str(item.get("cohort_id") or ""),
+                benchmark_family=str(item.get("benchmark_family") or ""),
+                independence_key=str(item.get("independence_key") or ""),
+                candidate_id=str(item.get("candidate_id") or ""),
+                execution_id=str(item.get("execution_id") or ""),
+                details=str(item.get("details") or ""),
+            ))
+        benchmark_results = []
+        for item in args.get("benchmark_results") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each benchmark result must be an object.")
+            benchmark_results.append(BenchmarkResult(
+                str(item["capability_id"]), str(item["domain"]),
+                int(item["attempts"]), float(item["pass_rate"]),
+                float(item.get("confidence", 0.0)),
+                int(item.get("independent_attempts", item["attempts"])),
+                str(item["status"]), str(item.get("reason", "")),
+                str(item.get("cohort_id") or item.get("independence_key") or ""),
+                str(item.get("independence_key") or item.get("cohort_id") or ""),
+                str(item.get("benchmark_family") or "generated_holdout"),
+            ))
+        report = fabric.evaluate(outcomes, benchmark_results=benchmark_results)
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+
+    if name == "capability_outcome_attribution":
+        calibration = CapabilityCalibrationStore()
+        curriculum = CapabilityCurriculumStore()
+        for item in args.get("candidates") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each curriculum candidate must be an object.")
+            curriculum.register(CurriculumCandidate(
+                str(item["candidate_id"]), str(item["capability_id"]), str(item.get("domain") or ""),
+                float(item.get("novelty", 0)), float(item.get("uncertainty", 0)),
+                float(item.get("failure_risk", 0)), float(item.get("evidence_value", 0)),
+                float(item.get("estimated_cost", 0)), float(item.get("transfer_gap", 0)),
+            ))
+        for item in args.get("calibration_history") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each calibration history item must be an object.")
+            calibration.observe(CalibrationObservation(
+                str(item["capability_id"]), float(item["predicted_confidence"]),
+                bool(item["passed"]), bool(item.get("holdout", False)),
+                float(item.get("evidence_confidence", 0.0)), bool(item.get("eligible", True)),
+            ))
+        outcomes = []
+        for item in args.get("outcomes") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Each capability outcome must be an object.")
+            outcomes.append(CapabilityOutcome(
+                capability_id=str(item["capability_id"]),
+                predicted_confidence=float(item["predicted_confidence"]),
+                passed=bool(item["passed"]),
+                evidence_confidence=float(item.get("evidence_confidence", 0.0)),
+                holdout=bool(item.get("holdout", False)),
+                independent=bool(item.get("independent", False)),
+                domain=str(item.get("domain") or ""),
+                provider=str(item.get("provider") or ""),
+                cohort_id=str(item.get("cohort_id") or ""),
+                benchmark_family=str(item.get("benchmark_family") or ""),
+                independence_key=str(item.get("independence_key") or ""),
+                candidate_id=str(item.get("candidate_id") or ""),
+                execution_id=str(item.get("execution_id") or ""),
+                details=str(item.get("details") or ""),
+            ))
+        store = CapabilityOutcomeAttributionStore()
+        report = store.report(outcomes, calibration_store=calibration, curriculum_store=curriculum)
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if name == "capability_promotion_decision":
+        holdout = args.get("holdout") or {}
+        if not isinstance(holdout, dict):
+            raise ValueError("holdout must be an object.")
+        store = CapabilityPromotionStore()
+        benchmark_items = args.get("benchmark_results") or []
+        if benchmark_items:
+            from .holdout_benchmark import BenchmarkResult
+            results = []
+            for item in benchmark_items:
+                if not isinstance(item, dict):
+                    raise ValueError("Each benchmark result must be an object.")
+                results.append(BenchmarkResult(
+                    str(item["capability_id"]), str(item["domain"]),
+                    int(item["attempts"]), float(item["pass_rate"]),
+                    float(item.get("confidence", 0.0)),
+                    int(item.get("independent_attempts", item["attempts"])),
+                    str(item["status"]), str(item.get("reason", "")),
+                    str(item.get("cohort_id") or item.get("independence_key") or ""),
+                    str(item.get("independence_key") or item.get("cohort_id") or ""),
+                    str(item.get("benchmark_family") or "generated_holdout"),
+                ))
+            decision = store.evaluate_benchmark_results(results)
+        else:
+            cohort_items = args.get("cohorts") or []
+        if cohort_items:
+            observations = []
+            for item in cohort_items:
+                if not isinstance(item, dict):
+                    raise ValueError("Each cohort observation must be an object.")
+                observations.append(CohortEvidence(
+                    str(item["capability_id"]), str(item["cohort_id"]), bool(item["passed"]),
+                    float(item.get("confidence", item.get("evidence_confidence", 0.0))),
+                    str(item.get("domain") or ""), str(item.get("benchmark_family") or ""),
+                    str(item.get("independence_key") or ""),
+                ))
+            decision = store.evaluate_multi_cohort(observations)
+        else:
+            decision = store.evaluate_holdout(HoldoutEvidence(
+                str(holdout["capability_id"]),
+                int(holdout["attempts"]),
+                float(holdout["pass_rate"]),
+                float(holdout.get("confidence", 0.0)),
+                bool(holdout.get("independent", True)),
+            ))
+        if decision.state.status == "canary":
+            observations = []
+            for item in args.get("canary") or []:
+                if not isinstance(item, dict):
+                    raise ValueError("Each canary observation must be an object.")
+                observations.append(CanaryEvidence(
+                    str(item.get("capability_id") or holdout["capability_id"]),
+                    bool(item["passed"]),
+                    float(item.get("evidence_confidence", 0.0)),
+                ))
+            if observations:
+                decision = store.evaluate_canary(str(holdout["capability_id"]), observations)
+        return json.dumps(decision.to_dict(), indent=2, ensure_ascii=False)
+    if name == "webmcp_security_evaluation":
+        return json.dumps(evaluate_webmcp_security().to_dict(), indent=2, ensure_ascii=False)
     if name == "call_webmcp_tool":
         tool_name = args["name"]
         raw_tools = await bridge.discover_tools()
@@ -578,10 +1132,43 @@ async def call_builtin(
         _, mapping = publish_tools(raw_tools, current.get("url"))
         available = {tool["name"] for tool in raw_tools}
         original_name = mapping.get(tool_name, tool_name)
-        if original_name not in available:
+        selected = next((dict(tool) for tool in raw_tools if str(tool.get("name") or "") == original_name), None)
+        if selected is None or original_name not in available:
             raise ValueError(f'No WebMCP tool named "{tool_name}" is registered on this page.')
-        result = await bridge.call_tool(original_name, args.get("arguments") or {})
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        registry = getattr(bridge, "_tool_trust_registry", None)
+        if registry is None:
+            registry = ToolTrustRegistry()
+            setattr(bridge, "_tool_trust_registry", registry)
+        parsed = urlsplit(current.get("url") or "")
+        selected["origin"] = selected.get("origin") or (
+            f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        )
+        assessment = registry.observe(selected)
+        if assessment.requires_confirmation:
+            raise PermissionError(
+                f'WebMCP tool "{tool_name}" requires confirmation/revalidation: '
+                + "; ".join(assessment.reasons)
+            )
+        try:
+            result = await bridge.call_tool(original_name, args.get("arguments") or {})
+        except Exception as exc:
+            registry.record_outcome(assessment.origin, assessment.name, False)
+            envelope = wrap_tool_output(
+                origin=assessment.origin,
+                name=assessment.name,
+                value=str(exc),
+                untrusted=True,
+            )
+            return json.dumps(envelope.to_dict(), ensure_ascii=False)
+        registry.record_outcome(assessment.origin, assessment.name, True)
+        envelope = wrap_tool_output(
+            origin=assessment.origin,
+            name=assessment.name,
+            value=result,
+            untrusted=assessment.output_untrusted,
+            high_risk=assessment.risk.value == "consequential",
+        )
+        return json.dumps(envelope.to_dict(), ensure_ascii=False)
     if name == "list_saved_sites":
         saved = sites.list()
         if not saved:
@@ -671,6 +1258,21 @@ async def call_builtin(
         for step in workflow.steps:
             await bridge.run_recorded_step(step, variables)
         return await bridge.snapshot(interactive_only=True, compact=True)
+    if name == "run_bdd":
+        from .bdd import BDDRunner, parse_feature
+        value = str(args["feature"])
+        try:
+            from pathlib import Path
+            p = Path(value)
+            source = p.read_text(encoding="utf-8") if p.exists() else value
+        except OSError:
+            source = value
+        return json.dumps(
+            await BDDRunner(bridge).run(parse_feature(source), args.get("variables") or {}),
+            indent=2,
+            ensure_ascii=False,
+        )
+
     if name == "list_workflows":
         saved = workflows.list()
         if not saved:

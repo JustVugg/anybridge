@@ -11,6 +11,11 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 
 from .browser import PageBridge
+from .driver import BrowserDriver
+from .selenium_driver import SeleniumDriver
+from .providers import default_browser, select_provider
+from .provider_learning import select_learned_provider
+from .execution_fabric import ExecutionObservation, decide_execution
 from .builtins import BUILTIN_NAMES, BUILTIN_TOOLS, call_builtin
 from .engines import AdaptiveReader
 from .profiles import ProfileStore
@@ -83,6 +88,8 @@ _DESTRUCTIVE = {
     "remove_profile",
     "run_workflow",
     "remove_workflow",
+    "trust_network_host",
+    "revoke_network_host",
 }
 _LOCAL_ONLY = {
     "list_saved_sites",
@@ -162,10 +169,16 @@ class BridgeRuntime:
         profiles: ProfileStore | None = None,
         workflows: WorkflowStore | None = None,
         adaptive: AdaptiveReader | None = None,
-        bridge: PageBridge | None = None,
+        bridge: BrowserDriver | None = None,
         allow_private_network: bool = True,
+        allowed_hosts: tuple[str, ...] | list[str] = (),
+        provider: str = "auto",
+        browser: str = "auto",
+        provider_history: tuple[dict, ...] = (),
+        execution_history: tuple[dict, ...] = (),
     ) -> None:
         self.initial_url = url
+        self.allowed_hosts = tuple(allowed_hosts)
         self.wait = wait
         self.builtins = builtins
         self.sites = sites or SiteStore()
@@ -174,13 +187,47 @@ class BridgeRuntime:
         self.profiles = profiles or ProfileStore()
         self.workflows = workflows or WorkflowStore()
         self.adaptive = adaptive or AdaptiveReader(
-            allow_private_network=allow_private_network
-        )
-        self.bridge = bridge or PageBridge(
-            url,
-            headless=headless,
             allow_private_network=allow_private_network,
+            allowed_hosts=self.allowed_hosts,
         )
+        if bridge is not None:
+            self.provider = getattr(bridge, "provider", provider)
+            self.browser = getattr(bridge, "browser", browser)
+            self.bridge = bridge
+        else:
+            browser_requirement = None if browser == "auto" else browser
+            if provider == "playwright" and browser_requirement == "chrome":
+                browser_requirement = "chromium"
+            if provider == "auto" and execution_history:
+                decision = decide_execution(
+                    browser=browser_requirement,
+                    history=execution_history,
+                )
+                self.provider = decision.provider
+                self.browser = decision.browser
+            elif provider == "auto" and provider_history:
+                self.provider = select_learned_provider(
+                    browser=browser_requirement,
+                    history=provider_history,
+                )
+            else:
+                self.provider = select_provider(
+                    preferred=None if provider == "auto" else provider,
+                    browser=browser_requirement,
+                )
+            self.browser = default_browser(self.provider) if browser == "auto" else (
+                "chromium" if self.provider == "playwright" and browser == "chrome" else browser
+            )
+            if self.provider == "selenium":
+                self.bridge = SeleniumDriver(
+                    url, headless=headless, allow_private_network=allow_private_network,
+                    allowed_hosts=self.allowed_hosts, browser=self.browser,
+                )
+            else:
+                self.bridge = PageBridge(
+                    url, headless=headless, allow_private_network=allow_private_network,
+                    allowed_hosts=self.allowed_hosts,
+                )
         self._start_lock = asyncio.Lock()
 
     async def ensure_browser(self) -> None:
@@ -261,12 +308,12 @@ class BridgeRuntime:
         await self.bridge.close()
 
 
-def create_server(runtime: BridgeRuntime | None = None) -> Server:
+def create_server(runtime: BridgeRuntime | None = None, *, provider: str = "auto", browser: str = "auto") -> Server:
     """Build the low-level MCP server around a runtime."""
 
     @asynccontextmanager
     async def remote_lifespan(server):
-        session_runtime = BridgeRuntime(allow_private_network=False)
+        session_runtime = BridgeRuntime(allow_private_network=False, provider=provider, browser=browser)
         try:
             yield session_runtime
         finally:
@@ -357,12 +404,15 @@ async def serve(
     headless: bool = True,
     wait: float = 5.0,
     builtins: bool = True,
+    allowed_hosts: tuple[str, ...] | list[str] = (),
+    provider: str = "auto",
+    browser: str = "auto",
 ) -> None:
     """Run the AnyBridge MCP server over stdio."""
     if not url and not builtins:
         raise ValueError("A URL is required when --no-builtins is used.")
 
-    runtime = BridgeRuntime(url, headless=headless, wait=wait, builtins=builtins)
+    runtime = BridgeRuntime(url, headless=headless, wait=wait, builtins=builtins, allowed_hosts=allowed_hosts, provider=provider, browser=browser)
     server = create_server(runtime)
     try:
         async with stdio_server() as (read, write):

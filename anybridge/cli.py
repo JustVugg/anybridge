@@ -7,10 +7,31 @@ import os
 import sys
 
 from .browser import PageBridge
+from .selenium_driver import SeleniumDriver
 from .builtins import BUILTIN_NAMES, BUILTIN_TOOLS
 from .repositories import RepositoryError, RepositoryManager, RepositoryStore
 from .sites import SiteStore, SiteStoreError
 from .webmcp import publish_tools
+from .providers import default_browser, select_provider
+
+
+def _provider_and_browser(args):
+    requested_browser = args.browser
+    if args.provider == "playwright":
+        provider = "playwright"
+        browser = "chromium" if requested_browser in {"auto", "chrome"} else requested_browser
+    elif args.provider == "selenium":
+        provider = "selenium"
+        browser = "chrome" if requested_browser == "auto" else requested_browser
+    else:
+        provider_browser = None if requested_browser == "auto" else requested_browser
+        if requested_browser == "chrome":
+            provider_browser = "chrome"
+        provider = select_provider(browser=provider_browser)
+        browser = default_browser(provider) if requested_browser == "auto" else (
+            "chromium" if provider == "playwright" and requested_browser == "chrome" else requested_browser
+        )
+    return provider, browser
 
 
 def _print_tools(site: list[dict], builtins: list[dict], as_json: bool):
@@ -36,7 +57,11 @@ def _print_group(tools: list[dict]):
 
 
 async def _list(args):
-    async with PageBridge(args.url, headless=not args.headed) as bridge:
+    provider_name, browser = _provider_and_browser(args)
+    provider = SeleniumDriver if provider_name == "selenium" else PageBridge
+    kwargs = {"headless": not args.headed, "allowed_hosts": args.allow_host}
+    if provider_name == "selenium": kwargs["browser"] = browser
+    async with provider(args.url, **kwargs) as bridge:
         raw = await bridge.discover_tools(
             timeout=args.wait, reload_on_failure=True
         )
@@ -56,6 +81,9 @@ async def _call(args):
             initial_url,
             headless=not args.headed,
             wait=args.wait,
+            allowed_hosts=args.allow_host,
+            provider=args.provider,
+            browser=args.browser,
         )
         if args.tool in {"navigate", "smart_read"}:
             tool_args.setdefault("url", args.url)
@@ -64,7 +92,11 @@ async def _call(args):
         finally:
             await runtime.close()
         return
-    async with PageBridge(args.url, headless=not args.headed) as bridge:
+    provider_name, browser = _provider_and_browser(args)
+    provider = SeleniumDriver if provider_name == "selenium" else PageBridge
+    kwargs = {"headless": not args.headed, "allowed_hosts": args.allow_host}
+    if provider_name == "selenium": kwargs["browser"] = browser
+    async with provider(args.url, **kwargs) as bridge:
         raw = await bridge.discover_tools(
             timeout=args.wait, reload_on_failure=True
         )
@@ -76,6 +108,21 @@ async def _call(args):
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+async def _bdd(args):
+    from .bdd import BDDRunner, parse_feature
+    from pathlib import Path
+    provider_name, browser = _provider_and_browser(args)
+    provider = SeleniumDriver if provider_name == "selenium" else PageBridge
+    kwargs = {"headless": not args.headed, "allowed_hosts": args.allow_host}
+    if provider_name == "selenium": kwargs["browser"] = browser
+    bridge = provider(args.url, **kwargs)
+    await bridge.start()
+    try:
+        source = Path(args.feature).read_text(encoding="utf-8") if Path(args.feature).exists() else args.feature
+        print(json.dumps(await BDDRunner(bridge).run(parse_feature(source)), indent=2, ensure_ascii=False))
+    finally:
+        await bridge.close()
+
 async def _serve(args):
     from .server import serve
 
@@ -84,6 +131,9 @@ async def _serve(args):
         headless=not args.headed,
         wait=args.wait,
         builtins=not args.no_builtins,
+        allowed_hosts=args.allow_host,
+        provider=args.provider,
+        browser=args.browser,
     )
 
 
@@ -176,6 +226,28 @@ def main():
             action="store_true",
             help="Expose only the site's own WebMCP tools",
         )
+        p.add_argument(
+            "--allow-host",
+            action="append",
+            default=[],
+            metavar="HOST",
+            help=(
+                "Explicitly trust a private-site dependency host (repeatable; exact host or *.domain). "
+                "Use only for third-party CDN, analytics, telemetry, or authentication hosts you trust."
+            ),
+        )
+        p.add_argument(
+            "--provider",
+            choices=["auto", "playwright", "selenium"],
+            default="auto",
+            help="Browser provider (default: playwright)",
+        )
+        p.add_argument(
+            "--browser",
+            choices=["auto", "chrome", "firefox", "edge"],
+            default="auto",
+            help="Browser used by the selected provider (default: chrome)",
+        )
 
     p_list = sub.add_parser("list", help="List the tools available on a page")
     common(p_list)
@@ -187,6 +259,15 @@ def main():
     p_call.add_argument("tool", help="Tool name")
     p_call.add_argument("--args", default="{}", help='Tool arguments as JSON (default "{}")')
     p_call.set_defaults(func=_call)
+
+    p_bdd = sub.add_parser("bdd", help="Run a Gherkin feature through AnyBridge")
+    p_bdd.add_argument("feature", help="Feature file path or inline Gherkin text")
+    p_bdd.add_argument("--url", default=None, help="Initial page URL if the feature does not navigate")
+    p_bdd.add_argument("--provider", choices=["auto","playwright","selenium"], default="auto")
+    p_bdd.add_argument("--browser", choices=["auto","chrome","firefox","edge"], default="auto")
+    p_bdd.add_argument("--headed", action="store_true")
+    p_bdd.add_argument("--allow-host", action="append", default=[])
+    p_bdd.set_defaults(func=_bdd)
 
     p_serve = sub.add_parser("serve", help="Run an MCP stdio server for the page")
     common(p_serve, optional_url=True)
@@ -241,6 +322,8 @@ def main():
     p_remote.add_argument("--allowed-host", action="append", default=[])
     p_remote.add_argument("--allowed-origin", action="append", default=[])
     p_remote.add_argument("--idle-timeout", type=float, default=900)
+    p_remote.add_argument("--provider", choices=["playwright","selenium"], default="playwright")
+    p_remote.add_argument("--browser", choices=["chrome","firefox","edge"], default="chrome")
 
     args = parser.parse_args()
     if args.command is None:
@@ -261,6 +344,8 @@ def main():
                 allowed_hosts=args.allowed_host,
                 allowed_origins=args.allowed_origin,
                 idle_timeout=args.idle_timeout,
+                provider=args.provider,
+                browser=args.browser,
             )
             return
         asyncio.run(args.func(args))

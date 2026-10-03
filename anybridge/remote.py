@@ -56,6 +56,8 @@ def create_remote_app(
     allowed_hosts: Iterable[str] = (),
     allowed_origins: Iterable[str] = (),
     idle_timeout: float = 900,
+    provider: str = "playwright",
+    browser: str = "chrome",
 ) -> object:
     """Create a stateful, authenticated Streamable HTTP MCP application."""
     if host not in {"127.0.0.1", "localhost", "::1"} and not api_token:
@@ -74,7 +76,7 @@ def create_remote_app(
         allowed_origins=list(allowed_origins),
     )
     manager = StreamableHTTPSessionManager(
-        app=create_server(),
+        app=create_server(provider=provider, browser=browser),
         json_response=True,
         stateless=False,
         security_settings=security,
@@ -108,6 +110,8 @@ def run_remote(
     allowed_hosts: Iterable[str] = (),
     allowed_origins: Iterable[str] = (),
     idle_timeout: float = 900,
+    provider: str = "playwright",
+    browser: str = "chrome",
 ) -> None:
     import uvicorn
 
@@ -118,5 +122,7 @@ def run_remote(
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
         idle_timeout=idle_timeout,
+        provider=provider,
+        browser=browser,
     )
     uvicorn.run(app, host=host, port=port, log_level="info")

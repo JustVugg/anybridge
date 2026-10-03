@@ -140,12 +140,13 @@ class PageBridge:
         *,
         allow_private_network: bool = True,
         storage_state: dict | None = None,
+        allowed_hosts: tuple[str, ...] | list[str] = (),
     ):
         self.url = normalize_url(url) if url else "about:blank"
         self.headless = headless
         self.allow_private_network = allow_private_network
         self.storage_state = storage_state
-        self._guard = NetworkGuard(allow_private=allow_private_network)
+        self._guard = NetworkGuard(allow_private=allow_private_network, isolate_private=True, allowed_hosts=allowed_hosts)
         self._pw = None
         self._browser = None
         self._context = None
@@ -170,12 +171,21 @@ class PageBridge:
             "user_agent": ua,
             "viewport": {"width": 1280, "height": 900},
             "locale": "en-US",
+            # NetworkGuard is installed with browserContext.route(). Playwright
+            # documents that Service Workers can bypass normal page routing, so
+            # block registration in security-sensitive sessions.
+            "service_workers": "block",
         }
         if self.storage_state:
             context_options["storage_state"] = self.storage_state
         self._context = await self._browser.new_context(**context_options)
-        if not self.allow_private_network:
-            await self._context.route("**/*", self._guard.route)
+        # All browser egress is checked. Private targets enter isolation;
+        # explicitly approved dependency hosts remain available to the app.
+        await self._context.route("**/*", self._guard.route)
+        # WebSockets use a separate Playwright routing API. Guard them too
+        # when the installed Playwright exposes route_web_socket().
+        if hasattr(self._context, "route_web_socket"):
+            await self._context.route_web_socket("**/*", self._guard_websocket)
         await self._context.add_init_script(SHIM)
         await self._context.add_init_script(PAGETOOLS)
         # Links with target=_blank open a new tab; follow it as the current page.
@@ -185,6 +195,90 @@ class PageBridge:
             await self._goto(self.url)
             await asyncio.sleep(settle)
         return self
+
+    async def _guard_websocket(self, websocket) -> None:
+        """Apply the same hostname policy to WebSocket connections."""
+        try:
+            await self._guard.assert_url(websocket.url)
+        except Exception:
+            await websocket.close(code=1008, reason="AnyBridge network policy blocked")
+            return
+        await websocket.connect_to_server()
+
+
+    async def click_text(self, text: str):
+        locator = self._page.get_by_text(text, exact=True).first
+        await locator.click()
+        return await self.snapshot()
+
+    async def fill_label(self, label: str, value: str):
+        locator = self._page.get_by_label(label, exact=True).first
+        await locator.fill(value)
+        return await self.snapshot()
+
+    async def capabilities(self) -> dict:
+        return {
+            "provider": "playwright",
+            "browser": "chromium",
+            "webmcp": True,
+            "network_interception": True,
+            "websocket_interception": hasattr(self._context, "route_web_socket") if self._context else False,
+            "screenshot": True,
+            "storage_state": True,
+            "bdd": True,
+        }
+
+    async def collect_evidence(
+        self,
+        *,
+        test_id: str | None = None,
+        execution_id: str | None = None,
+        action: str | None = None,
+        expected=None,
+        assertion: str | None = None,
+        status: str = "observed",
+        confidence: float | None = None,
+    ) -> dict:
+        from .evidence import EvidenceEnvelope
+        import time
+        started = time.perf_counter()
+        snapshot = await self.snapshot(interactive_only=False, max_chars=20000)
+        screenshot = await self.screenshot()
+        policy = await self.network_policy()
+        return EvidenceEnvelope(
+            test_id=test_id,
+            execution_id=execution_id,
+            url=self.current_url,
+            action=action,
+            expected=expected,
+            observed=snapshot,
+            assertion=assertion,
+            status=status,
+            screenshot=screenshot,
+            dom_snapshot=snapshot,
+            network_errors=list(policy.get("blocked_hosts", [])),
+            timing_ms=(time.perf_counter() - started) * 1000,
+            browser="chromium",
+            provider="playwright",
+            environment={"private_isolation": policy.get("private_site_isolation", False)},
+            confidence=confidence,
+        ).to_dict()
+
+    async def network_policy(self) -> dict:
+        """Return the safe local network policy and blocked dependency hosts."""
+        return self._guard.policy()
+
+    async def trust_host(self, host: str) -> dict:
+        """Explicitly trust one host for the current browser session."""
+        normalized = host.strip().rstrip(".").casefold()
+        if not normalized or "/" in normalized or ":" in normalized:
+            raise ValueError("Provide a hostname, not a URL or port.")
+        self._guard.allow_hosts((normalized,))
+        return self._guard.policy()
+
+    async def revoke_host(self, host: str) -> dict:
+        """Revoke one explicitly trusted host for the current browser session."""
+        return self._guard.revoke_host(host)
 
     @property
     def started(self) -> bool:
@@ -206,7 +300,19 @@ class PageBridge:
         """
         for browser_args in ({"channel": "chromium"}, {}):
             try:
-                return await self._pw.chromium.launch(headless=self.headless, **browser_args)
+                return await self._pw.chromium.launch(
+                    headless=self.headless,
+                    args=[
+                        "--disable-background-networking",
+                        "--disable-component-update",
+                        "--disable-domain-reliability",
+                        "--disable-sync",
+                        "--disable-breakpad",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
+                    **browser_args,
+                )
             except Error as exc:
                 message = str(exc)
                 if "playwright install" in message or "Executable doesn't exist" in message:
@@ -215,7 +321,17 @@ class PageBridge:
                         self._installed = True
                     try:
                         return await self._pw.chromium.launch(
-                            headless=self.headless, **browser_args
+                            headless=self.headless,
+                            args=[
+                                "--disable-background-networking",
+                                "--disable-component-update",
+                                "--disable-domain-reliability",
+                                "--disable-sync",
+                                "--disable-breakpad",
+                                "--no-first-run",
+                                "--no-default-browser-check",
+                            ],
+                            **browser_args,
                         )
                     except Error as retry_exc:
                         message = str(retry_exc)

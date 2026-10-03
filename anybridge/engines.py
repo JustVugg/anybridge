@@ -148,13 +148,18 @@ class AdaptiveReader:
         self,
         *,
         allow_private_network: bool = True,
+        allowed_hosts: tuple[str, ...] | list[str] = (),
         cache_seconds: float = 300,
         cache_path: Path | None = None,
         archive_fallback: bool = True,
         browser_timeout: float = 45,
         total_timeout: float = 68,
     ) -> None:
-        self.guard = NetworkGuard(allow_private=allow_private_network)
+        self.guard = NetworkGuard(
+            allow_private=allow_private_network,
+            isolate_private=True,
+            allowed_hosts=allowed_hosts,
+        )
         # Under the 75-second MCP call deadline in server.py, with margin.
         self.total_timeout = max(5.0, float(total_timeout))
         self.cache_seconds = max(0.0, float(cache_seconds))
@@ -201,6 +206,11 @@ class AdaptiveReader:
         total_timeout: float | None = None,
     ) -> EngineResult:
         target = normalize_url(url)
+        # Establish the same network policy before any fallback can run. In
+        # particular, a private-site session must never fall through to a
+        # third-party archive service.
+        await self.guard.assert_url(target)
+        private_session = self.guard.private_isolation
         document = self._is_pdf(target)
         max_chars = max(500, min(int(max_chars), 100000))
         page_range = self.parse_pages(pages)
@@ -306,7 +316,11 @@ class AdaptiveReader:
             if stale:
                 return stale
 
-        if self.archive_fallback and prefer in {"auto", "archive", "chromium"}:
+        if (
+            self.archive_fallback
+            and not private_session
+            and prefer in {"auto", "archive", "chromium"}
+        ):
             timeout = budget.slice(18)
             if timeout:
                 try:
